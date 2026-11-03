@@ -13,3 +13,4 @@ mod page_geometry;
 mod speed;
 mod text_boundary;
 mod visual_comparison;
+mod wordcraft_comparison;
