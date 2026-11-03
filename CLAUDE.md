@@ -44,14 +44,14 @@ cd tools && cargo build && cd ..
 ./tools/target/debug/analyze-fixtures --audit      # feature audit: which XML features appear in failing vs passing
 ./tools/target/debug/analyze-fixtures --grep "w:caps"  # search for specific XML pattern across all fixtures
 
-# Side-by-side engine viewer: Word reference | ours | LibreOffice | MiniPdf | rdocx | office2pdf → comparison/index.html (static site, gitignored)
+# Side-by-side engine viewer: Word reference | ours | LibreOffice | MiniPdf | rdocx | office2pdf | WordCraft → comparison/index.html (static site, gitignored)
 python3 tools/engine_compare.py --open                 # all fixtures (reuses tests/output PNGs, caches the rest in comparison/work/)
 python3 tools/engine_compare.py --case case41 --case 'case2*'   # exact name or glob
 python3 tools/engine_compare.py --html-only            # rebuild index.html from comparison/work/manifest.json (no re-scoring)
 python3 tools/engine_compare.py --shard 0/8            # one of 8 shards, by name hash (CI runs 8 such jobs, then --merge joins their manifests)
 tools/deploy_comparison.sh [remote] [branch]           # publish comparison/ (work/ excluded) as an orphan gh-pages commit (DRY_RUN=1 to preview)
 # CI does both on every push to main: .github/workflows/comparison.yml (fonts come from the private sverrejb/docxide-pdf-assets repo; only tracked cases/ are compared)
-# MiniPdf = the Rust crate's CLI (`cargo install minipdf-cli`), never the .NET engine; rdocx via `cargo install rdocx`; office2pdf via `cargo install office2pdf-cli`; jubarte-redlines via `cargo install jubarte-redlines` (binary `jubarte`); LibreOffice via soffice
+# MiniPdf = the Rust crate's CLI (`cargo install minipdf-cli`), never the .NET engine; rdocx via `cargo install rdocx`; office2pdf via `cargo install office2pdf-cli`; jubarte-redlines via `cargo install jubarte-redlines` (binary `jubarte`); WordCraft = `wordcraft-cli` from its release tarball (or WORDCRAFT_BIN); LibreOffice via soffice
 
 # Word for Mac, unattended: export .docx → .pdf with Word itself (probe documents, what-if experiments)
 python3 tools/word_export.py <file-or-dir>... [--out DIR] [--force] [--timeout S] [--preset online|print]   # default online = tagged refs; stages inside Word's container, answers dialogs; needs the sandbox off
@@ -171,6 +171,7 @@ tests/
     text_boundary.rs     — line start/end word metric
     font_validation.rs, image_count.rs, page_geometry.rs, file_size.rs — font/image/page-size/size parity
     libreoffice_comparison.rs — opt-in (DOCXIDE_LO_COMPARE=1) comparison with LibreOffice
+    wordcraft_comparison.rs — opt-in (WORDCRAFT_CLI=<wordcraft-cli>) comparison with WordCraft, writes tests/output/wordcraft_comparison.json
     speed.rs             — conversion timing (#[ignore])
   common/              — shared harness (suite's `common` module via #[path]): mod.rs (fixtures, conversion, baselines, per-case score caches), metrics.rs (rasterization, Jaccard/SSIM; also tools/page-metrics), a11y.rs, text_boundary.rs
   baselines.json, visual_hashes.json — accepted scores and page hashes
@@ -183,7 +184,7 @@ tests/
 - `DOCXIDE_FONTS` — colon-separated (`;` on Windows) list of additional font directories to search (`.cargo/config.toml` points it at the repo's `fonts/` dir for cargo runs)
 - `DOCXIDE_NO_FONT_CACHE` — set to any value to disable the font index disk cache (forces full scan every time)
 - `DOCXIDE_DEBUG_WRAP` — set to draw the float wrap zones on the page
-- Test harness: `DOCXIDE_CASE` (one fixture by name), `DOCXIDE_GROUP` (one fixture group), `DOCXIDE_IMAGES` (also save side-by-side comparison PNGs), `DOCXIDE_LO_COMPARE` (opt into the LibreOffice comparison), `DOCXIDE_A11Y_GEN` (which PDF in tests/output to score for accessibility), `LIBREOFFICE_PATH` (soffice binary)
+- Test harness: `DOCXIDE_CASE` (one fixture by name), `DOCXIDE_GROUP` (one fixture group), `DOCXIDE_IMAGES` (also save side-by-side comparison PNGs), `DOCXIDE_LO_COMPARE` (opt into the LibreOffice comparison), `DOCXIDE_A11Y_GEN` (which PDF in tests/output to score for accessibility), `LIBREOFFICE_PATH` (soffice binary), `WORDCRAFT_CLI` (opt into the WordCraft comparison), `WC_LIST` (file of `group/case` keys it scores)
 - `DOCX_BIN` — CLI binary for `tools/engine_compare.py`
 
 ## Dependencies

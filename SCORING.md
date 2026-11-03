@@ -265,6 +265,7 @@ the handcrafted `cases/` fixtures.
 | Page geometry | Page size, ours vs Word's, within 1 point. |
 | Speed (`convert_ms`) | Conversion time per fixture. Opt-in (`#[ignore]`). Flags a fixture 1.5× slower than its baseline, or a total 1.3× slower. |
 | LibreOffice comparison | Scores LibreOffice's PDF with the same Jaccard and SSIM, for calibration. Opt-in: `./tools/run-tests.sh --libreoffice`. |
+| WordCraft comparison | Converts with WordCraft's `wordcraft-cli` and scores its PDF and ours with the same Jaccard and SSIM; per-page scores, page counts, sizes and timings go to `tests/output/wordcraft_comparison.json`. Opt-in: `WORDCRAFT_CLI=/path/to/wordcraft-cli cargo test --release --test suite wordcraft_comparison`. |
 
 For a side-by-side look at Word, us and other converters, see
 `tools/engine_compare.py` (described in `CLAUDE.md`).
