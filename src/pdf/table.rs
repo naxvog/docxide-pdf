@@ -460,6 +460,41 @@ fn draw_cell_paragraph_bottom(content: &mut Content, para: &CellParagraphLayout,
     }
 }
 
+/// The bookmarks of a cell paragraph, as placeholder link
+/// annotations spanning what is drawn of it (`top` to `bottom`, PDF points,
+/// y up). Cells are laid out away from the body's layout state, possibly
+/// more than once (trial layouts, rows split across pages); the placeholders
+/// land on the pages the paragraph is drawn on and become bookmark positions
+/// (and are dropped) in `take_cell_bookmarks` before the PDF is assembled.
+fn mark_cell_bookmarks(
+    links: &mut Vec<LinkAnnotation>,
+    source_para: Option<&Paragraph>,
+    x: f32,
+    width: f32,
+    top: f32,
+    bottom: f32,
+) {
+    let Some(para) = source_para else {
+        return;
+    };
+    for name in &para.bookmarks {
+        links.push(LinkAnnotation {
+            rect: pdf_writer::Rect::new(x, bottom, x + width, top),
+            url: format!("{}{name}", super::CELL_BOOKMARK_URL),
+            node: None,
+            text: String::new(),
+        });
+    }
+}
+
+/// The cell paragraph at or after `from` in the cell's blocks.
+fn cell_source_para(blocks: &[Block], from: usize) -> Option<&Paragraph> {
+    blocks.get(from..)?.iter().find_map(|block| match block {
+        Block::Paragraph(p) => Some(p),
+        _ => None,
+    })
+}
+
 fn render_cell_content(
     content: &mut Content,
     items: &[CellContentItem],
@@ -525,6 +560,7 @@ fn render_cell_content(
                         );
                     }
                     draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
+                    mark_cell_bookmarks(links, source_para, cell_x, col_w, para_top, cursor_y);
                     end_cell_tag(content, &tagger);
                     continue;
                 }
@@ -569,6 +605,7 @@ fn render_cell_content(
                     });
                     cursor_y -= super::helpers::border_band(para.bottom_border.as_ref());
                     draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
+                    mark_cell_bookmarks(links, source_para, cell_x, col_w, para_top, cursor_y);
                     continue;
                 }
 
@@ -649,6 +686,7 @@ fn render_cell_content(
 
                 cursor_y -= block_h;
                 draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
+                mark_cell_bookmarks(links, source_para, cell_x, col_w, para_top, cursor_y);
 
                 if let Some(src) = source_para {
                     render_cell_floating_shapes(
@@ -1203,6 +1241,8 @@ fn render_partial_cell_content(
         match &items[pi] {
             CellContentItem::Paragraph(para) => {
                 let sb = chunk_space_before(&items[pi], pi, start);
+                let chunk_top = cursor_y;
+                let source_para = cell_source_para(blocks, item_to_block[pi]);
 
                 let cell_nodes = tagger.as_mut().map(|t| {
                     let labelled = !para.list_label.is_empty();
@@ -1212,6 +1252,7 @@ fn render_partial_cell_content(
                 if !para_has_visible_content(para) {
                     cursor_y -= sb + para_block_height(para);
                     draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
+                    mark_cell_bookmarks(links, source_para, cell_x, col_w, chunk_top, cursor_y);
                     end_cell_tag(content, &tagger);
                     continue;
                 }
@@ -1235,6 +1276,7 @@ fn render_partial_cell_content(
                     });
                     cursor_y -= super::helpers::border_band(para.bottom_border.as_ref());
                     draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
+                    mark_cell_bookmarks(links, source_para, cell_x, col_w, chunk_top, cursor_y);
                     continue;
                 }
 
@@ -1308,6 +1350,7 @@ fn render_partial_cell_content(
                 if l1 == para.lines.len() {
                     draw_cell_paragraph_bottom(content, para, cell_x, col_w, cm, cursor_y);
                 }
+                mark_cell_bookmarks(links, source_para, cell_x, col_w, chunk_top, cursor_y);
             }
             CellContentItem::NestedTable {
                 col_widths,

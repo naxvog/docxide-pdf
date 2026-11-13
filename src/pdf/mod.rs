@@ -1872,6 +1872,81 @@ impl PageBuilder {
     }
 }
 
+/// Where a bookmarked body paragraph was laid out (PDF points, y up): the top
+/// of its first line and the bottom of its last line, with their page indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookmarkPosition {
+    pub name: String,
+    pub page: usize,
+    pub top: f32,
+    pub end_page: usize,
+    pub bottom: f32,
+}
+
+static BOOKMARK_POSITIONS: std::sync::Mutex<Vec<BookmarkPosition>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Placeholder link target of a bookmark in a table cell (see
+/// `table::mark_cell_bookmarks`); never written to the PDF.
+pub(super) const CELL_BOOKMARK_URL: &str = "\u{0}docxide-cell-bookmark:";
+
+/// Removes the cell bookmark placeholders from the pages' links and
+/// returns where each bookmark is drawn: its first page and top, its last
+/// page and bottom (a row split across pages, a repeated header row).
+fn take_cell_bookmarks(all_links: &mut [Vec<LinkAnnotation>]) -> Vec<BookmarkPosition> {
+    let mut found: Vec<BookmarkPosition> = Vec::new();
+    for (page, links) in all_links.iter_mut().enumerate() {
+        links.retain(|link| {
+            let Some(name) = link.url.strip_prefix(CELL_BOOKMARK_URL) else {
+                return true;
+            };
+            let (top, bottom) = (link.rect.y2, link.rect.y1);
+            match found.iter_mut().find(|p| p.name == name) {
+                Some(position) => {
+                    position.end_page = page;
+                    position.bottom = bottom;
+                }
+                None => found.push(BookmarkPosition {
+                    name: name.to_string(),
+                    page,
+                    top,
+                    end_page: page,
+                    bottom,
+                }),
+            }
+            false
+        });
+    }
+    found
+}
+
+fn store_bookmark_positions(state: &LayoutState, in_cells: Vec<BookmarkPosition>) {
+    let mut positions: Vec<BookmarkPosition> = state
+        .bookmark_positions
+        .iter()
+        .map(|(name, &(page, top))| {
+            let (end_page, bottom) = state
+                .bookmark_end_positions
+                .get(name)
+                .copied()
+                .unwrap_or((page, top));
+            BookmarkPosition { name: name.clone(), page, top, end_page, bottom }
+        })
+        .collect();
+    positions.extend(
+        in_cells
+            .into_iter()
+            .filter(|cell| !state.bookmark_positions.contains_key(&cell.name)),
+    );
+    positions.sort_by(|a, b| a.name.cmp(&b.name));
+    *BOOKMARK_POSITIONS.lock().unwrap_or_else(|e| e.into_inner()) = positions;
+}
+
+/// The bookmark positions of the last conversion.
+pub fn take_bookmark_positions() -> Vec<BookmarkPosition> {
+    std::mem::take(&mut *BOOKMARK_POSITIONS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Bundles the mutable render loop state so it can be passed to extracted functions.
 pub(super) struct LayoutState {
     pub(super) pb: PageBuilder,
@@ -1881,6 +1956,9 @@ pub(super) struct LayoutState {
     pub(super) global_block_idx: usize,
     pub(super) heading_entries: Vec<HeadingEntry>,
     pub(super) bookmark_positions: HashMap<String, (usize, f32)>,
+    /// Where each bookmarked paragraph ends: page index and the bottom of its
+    /// last line (PDF points, y up).
+    pub(super) bookmark_end_positions: HashMap<String, (usize, f32)>,
     /// The keep-with-next chain being laid out is too long for a page: its
     /// paragraphs keep only their own link to the next.
     pub(super) long_keep_chain: bool,
@@ -1914,6 +1992,7 @@ impl LayoutState {
             global_block_idx: self.global_block_idx,
             heading_entries: Vec::new(),
             bookmark_positions: self.bookmark_positions.clone(),
+            bookmark_end_positions: self.bookmark_end_positions.clone(),
             long_keep_chain: self.long_keep_chain,
         }
     }
@@ -4046,6 +4125,14 @@ fn render_paragraph_block(
         if lines_that_fit >= min_split_lines && lines_that_fit < lines.len() {
             let first_part = &lines[..lines_that_fit];
             state.pb.slot_top -= inter_gap;
+            // A paragraph split across columns or pages has its
+            // bookmark positions too (the unsplit path records them below).
+            for bookmark in &para.bookmarks {
+                state.bookmark_positions.insert(
+                    bookmark.clone(),
+                    (state.pb.all_contents.len(), state.pb.slot_top),
+                );
+            }
             let baseline_offset = if grid_snapped {
                 grid_baseline
             } else {
@@ -4262,6 +4349,13 @@ fn render_paragraph_block(
                 );
             }
             state.prev_space_after = effective_space_after;
+
+            for bookmark in &para.bookmarks {
+                state.bookmark_end_positions.insert(
+                    bookmark.clone(),
+                    (state.pb.all_contents.len(), state.pb.slot_top),
+                );
+            }
 
             // Track the remaining footnotes for the split paragraph on the new page
             for run in para.runs.iter() {
@@ -4927,6 +5021,12 @@ fn render_paragraph_block(
             state.pb.all_contents.len(),
         );
     }
+    for bookmark in &para.bookmarks {
+        state.bookmark_end_positions.insert(
+            bookmark.clone(),
+            (state.pb.all_contents.len(), state.pb.slot_top),
+        );
+    }
     if !(text_empty && para.paragraph_mark_vanish) {
         state.prev_space_after = effective_space_after;
     }
@@ -4997,7 +5097,7 @@ fn render_pass(
     page_fields: Option<&BodyPageFields>,
 ) -> Result<(Vec<u8>, BodyPageFields), Error> {
     let debug_wrap = std::env::var("DOCXIDE_DEBUG_WRAP").is_ok();
-    let t0 = std::time::Instant::now();
+    let t0 = crate::clock::Instant::now();
     let mut pdf = Pdf::new();
     let mut next_id = 1i32;
     let mut alloc = || {
@@ -5134,6 +5234,7 @@ fn render_pass(
         global_block_idx: 0,
         heading_entries: Vec::new(),
         bookmark_positions,
+        bookmark_end_positions: HashMap::new(),
         long_keep_chain: false,
     };
     state.pb.tags.lang = document_lang(doc);
@@ -6108,6 +6209,8 @@ fn render_pass(
         }
     }
 
+    let cell_bookmarks = take_cell_bookmarks(&mut state.pb.all_links);
+
     // Links drawn in artifacts (headers and footers, repeated table header
     // rows) have no Link element, but PDF/UA puts every link annotation in
     // one (Word leaves them untagged): one per link, holding only its
@@ -6143,6 +6246,7 @@ fn render_pass(
         })
         .collect();
 
+    store_bookmark_positions(&state, cell_bookmarks);
     assemble_pdf_pages(
         &mut pdf,
         &mut alloc,

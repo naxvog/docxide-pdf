@@ -4,6 +4,24 @@ Library and CLI for converting DOCX files to PDF, matching Microsoft Word's outp
 
 [Try the demo!](https://docxide-demo.fly.dev/)
 
+> **About this fork.** This branch (`wasm-host`) adds, on top of
+> [naxvog/docxide-pdf](https://github.com/naxvog/docxide-pdf) at `55230886`, what a host
+> needs to convert inside a `wasm32-unknown-unknown` module with no file system, clock or
+> environment:
+>
+> - **wasm32 build:** `zip` with `deflate` only; `src/clock.rs` gives a no-op `Instant` on
+>   wasm; the check for renamed environment variables is skipped there.
+> - **Fonts in memory:** `register_font(bytes)`, `clear_fonts()` and
+>   `use_system_fonts(false)`; every font read looks in memory first.
+> - **Font requests:** `take_font_requests()` returns, per resolution, the names tried and
+>   not found, so a host can supply the first one it has and convert again.
+> - **Bookmark positions:** `take_bookmark_positions()` returns where each bookmarked
+>   paragraph was laid out (page and top of its first line, page and bottom of its last),
+>   table cells included.
+>
+> Licensed under Apache-2.0 as upstream; the files changed are listed in this branch's
+> history.
+
 **🫶 Accessible:** Output PDFs should be just as accessible as Word's export, or better: tagged structure, reading order, language and metadata that pass the same PDF/UA checks.
 
 **🎯 Accurate:** Given a `.docx` file, produce a `.pdf` that is visually identical to what Word would export.
