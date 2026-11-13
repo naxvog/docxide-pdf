@@ -1,11 +1,11 @@
 mod cache;
-mod discovery;
+pub(crate) mod discovery;
 mod embed;
 mod encoding;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use crate::clock::Instant;
 
 use pdf_writer::{Name, Pdf, Ref};
 
@@ -218,7 +218,7 @@ pub(crate) fn font_file(name: &str, embedded: &EmbeddedFonts) -> Option<(Vec<u8>
         return Some((data.clone(), 0));
     }
     let (path, index, ..) = discovery::find_font_file(name, false, false)?;
-    Some((std::fs::read(path).ok()?, index))
+    Some((discovery::read_font(&path)?, index))
 }
 
 pub(crate) fn primary_font_name(name: &str) -> &str {
@@ -315,7 +315,7 @@ fn try_font(
 
     let (path, face_index, face_bold, face_italic) =
         discovery::find_font_file(candidate, bold, italic)?;
-    let data = std::fs::read(&path).ok()?;
+    let data = discovery::read_font(&path)?;
     let metrics = embed(&data, face_index)?;
     Some(ResolvedFont {
         metrics,
@@ -811,6 +811,7 @@ pub(crate) fn register_font(
         descriptor: alloc(),
         data: alloc(),
     };
+    discovery::begin_font_request(bold, italic);
 
     let primary = primary_font_name(font_name);
 
@@ -1030,6 +1031,7 @@ pub(crate) fn register_font(
         }
     };
 
+    discovery::end_font_request();
     log::debug!(
         "register_font: {font_name} bold={bold} italic={italic} → {:.1}ms",
         t0.elapsed().as_secs_f64() * 1000.0,

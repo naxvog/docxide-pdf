@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use crate::clock::Instant;
 use std::{env, fs};
 
 use memmap2::Mmap;
@@ -303,7 +303,142 @@ fn scan_font_dirs() -> FontLookup {
     index
 }
 
+// ---------------------------------------------------------------------------
+// In-memory fonts and font requests (for hosts without a font directory, such
+// as a browser): the host registers font bytes, and every lookup that finds
+// nothing is recorded so the host can supply exactly the faces a document asks
+// for and convert again.
+
+#[derive(Default)]
+struct MemoryFonts {
+    index: FontLookup,
+    data: HashMap<PathBuf, Arc<[u8]>>,
+    /// Index keys a Thin/Light/Black… face holds: a regular-weight face of the
+    /// same family and style replaces it (as in the directory scan).
+    off_weight_keys: HashSet<(String, bool, bool)>,
+}
+
+static MEMORY_FONTS: LazyLock<RwLock<MemoryFonts>> = LazyLock::new(Default::default);
+
+/// One font lookup that missed: the family names tried, in the order the
+/// resolver tried them, and the style asked for. A face for the first name
+/// the host can supply is the one the resolver would have used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontRequest {
+    pub names: Vec<String>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+static CURRENT_REQUEST: Mutex<Option<FontRequest>> = Mutex::new(None);
+static FONT_REQUESTS: Mutex<Vec<FontRequest>> = Mutex::new(Vec::new());
+
+/// Register a font file (TrueType/OpenType, or each face of a collection) for
+/// every later conversion. Registered faces win over the system's. Returns the
+/// number of faces registered.
+pub fn register_font(data: Vec<u8>) -> usize {
+    let data: Arc<[u8]> = data.into();
+    let mut memory = MEMORY_FONTS.write().unwrap_or_else(|e| e.into_inner());
+    let path = PathBuf::from(format!("memory:{}", memory.data.len()));
+    let mut faces = 0;
+    for face_idx in 0..ttf_parser::fonts_in_collection(&data).unwrap_or(1) {
+        let Some((families, bold, italic, _, off_weight)) = read_font_style(&data, face_idx) else {
+            continue;
+        };
+        for family in families {
+            let key = (family.to_lowercase(), bold, italic);
+            let replace = !memory.index.contains_key(&key)
+                || (!off_weight && memory.off_weight_keys.contains(&key));
+            if replace {
+                memory.index.insert(key.clone(), (path.clone(), face_idx));
+                if off_weight {
+                    memory.off_weight_keys.insert(key);
+                } else {
+                    memory.off_weight_keys.remove(&key);
+                }
+            }
+        }
+        faces += 1;
+    }
+    if faces > 0 {
+        memory.data.insert(path, data);
+    }
+    faces
+}
+
+/// Forget every registered font.
+pub fn clear_fonts() {
+    *MEMORY_FONTS.write().unwrap_or_else(|e| e.into_inner()) = MemoryFonts::default();
+}
+
+/// The lookups that missed since the last call (each once), in order.
+pub fn take_font_requests() -> Vec<FontRequest> {
+    std::mem::take(&mut *FONT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Group the misses of one font resolution (a run's name and its fallbacks).
+pub(crate) fn begin_font_request(bold: bool, italic: bool) {
+    *CURRENT_REQUEST.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(FontRequest { names: Vec::new(), bold, italic });
+}
+
+pub(crate) fn end_font_request() {
+    if let Some(request) = CURRENT_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        record_request(request);
+    }
+}
+
+fn record_request(request: FontRequest) {
+    if request.names.is_empty() {
+        return;
+    }
+    let mut requests = FONT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    if !requests.contains(&request) {
+        requests.push(request);
+    }
+}
+
+fn note_miss(name: &str, bold: bool, italic: bool) {
+    let mut current = CURRENT_REQUEST.lock().unwrap_or_else(|e| e.into_inner());
+    match current.as_mut() {
+        Some(request) => {
+            if !request.names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                request.names.push(name.to_owned());
+            }
+        }
+        None => {
+            drop(current);
+            record_request(FontRequest { names: vec![name.to_owned()], bold, italic });
+        }
+    }
+}
+
+/// The bytes of a font file found by `find_font_file`: a registered font or a
+/// file on disk.
+pub(crate) fn read_font(path: &Path) -> Option<Vec<u8>> {
+    if let Some(data) = MEMORY_FONTS.read().unwrap_or_else(|e| e.into_inner()).data.get(path) {
+        return Some(data.to_vec());
+    }
+    fs::read(path).ok()
+}
+
+fn memory_lookup(key: &(String, bool, bool)) -> Option<(PathBuf, u32)> {
+    MEMORY_FONTS.read().unwrap_or_else(|e| e.into_inner()).index.get(key).cloned()
+}
+
+static SYSTEM_FONTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static NO_SYSTEM_FONTS: LazyLock<FontLookup> = LazyLock::new(FontLookup::new);
+
+/// Whether lookups also see the system's font directories (the default).
+/// Off, only registered fonts resolve, as on a host without a file system.
+pub fn use_system_fonts(enabled: bool) {
+    SYSTEM_FONTS.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn get_font_index() -> &'static FontLookup {
+    if !SYSTEM_FONTS.load(std::sync::atomic::Ordering::Relaxed) {
+        return &NO_SYSTEM_FONTS;
+    }
     FONT_INDEX.get_or_init(scan_font_dirs)
 }
 
@@ -318,6 +453,10 @@ pub(super) fn is_mac_only_family(name: &str) -> bool {
 
 /// Parse one face of a font file (memory-mapped, so only the tables touched are read).
 pub(super) fn probe_face<T>(path: &Path, face_index: u32, f: impl FnOnce(&Face) -> T) -> Option<T> {
+    let memory = MEMORY_FONTS.read().unwrap_or_else(|e| e.into_inner()).data.get(path).cloned();
+    if let Some(data) = memory {
+        return Face::parse(&data, face_index).ok().map(|face| f(&face));
+    }
     let file = fs::File::open(path).ok()?;
     let data = unsafe { Mmap::map(&file) }.ok()?;
     Face::parse(&data, face_index).ok().map(|face| f(&face))
@@ -333,13 +472,18 @@ pub(super) fn find_font_file(
 ) -> Option<(PathBuf, u32, bool, bool)> {
     let index = get_font_index();
     let key = font_name.to_lowercase();
-    if let Some((path, face_index)) = index.get(&(key.clone(), bold, italic)) {
-        return Some((path.clone(), *face_index, bold, italic));
+    let lookup = |b: bool, i: bool| {
+        let key = (key.clone(), b, i);
+        memory_lookup(&key).or_else(|| index.get(&key).cloned())
+    };
+    if let Some((path, face_index)) = lookup(bold, italic) {
+        return Some((path, face_index, bold, italic));
     }
     // A plain regular request that misses falls through to a generic family
     // fallback rather than borrowing this family's bold/italic face, which would
     // render unexpectedly heavy/slanted.
     if !bold && !italic {
+        note_miss(font_name, bold, italic);
         return None;
     }
     // A styled variant was requested but the exact (bold, italic) face is absent.
@@ -349,9 +493,10 @@ pub(super) fn find_font_file(
     // single styled face — e.g. Vivaldi is an italic-flagged script with no upright
     // or bold variant, so "Vivaldi bold" only resolves once we try (regular,italic).
     for (b, i) in [(bold, !italic), (!bold, italic), (!bold, !italic)] {
-        if let Some((path, face_index)) = index.get(&(key.clone(), b, i)) {
-            return Some((path.clone(), *face_index, b, i));
+        if let Some((path, face_index)) = lookup(b, i) {
+            return Some((path, face_index, b, i));
         }
     }
+    note_miss(font_name, bold, italic);
     None
 }

@@ -123,7 +123,7 @@ pub(super) fn load_font_data(
                 .map(|(_, e)| e)
         })?;
     let path = entry.font_path.as_ref()?;
-    let data = std::fs::read(path).ok()?;
+    let data = crate::fonts::discovery::read_font(path)?;
     Some((data, entry.face_index))
 }
 

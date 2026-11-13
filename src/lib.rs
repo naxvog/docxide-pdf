@@ -1,3 +1,4 @@
+mod clock;
 mod docx;
 mod error;
 mod fonts;
@@ -7,9 +8,13 @@ mod model;
 mod pdf;
 
 pub use error::Error;
+pub use fonts::discovery::{
+    FontRequest, clear_fonts, register_font, take_font_requests, use_system_fonts,
+};
+pub use pdf::{BookmarkPosition, take_bookmark_positions};
 
 use std::path::Path;
-use std::time::Instant;
+use crate::clock::Instant;
 
 pub fn convert_docx_to_pdf(input: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<(), Error> {
     reject_old_env_vars()?;
@@ -32,6 +37,9 @@ pub fn convert_docx_bytes_to_pdf_bytes(input: &[u8]) -> Result<Vec<u8>, Error> {
 /// The variables lost their old `DOCXSIDE_` prefix; failing loudly beats silently
 /// dropping someone's font directories and rendering with fallbacks.
 fn reject_old_env_vars() -> Result<(), Error> {
+    if cfg!(target_family = "wasm") {
+        return Ok(());
+    }
     match old_env_var(std::env::vars_os().map(|(key, _)| key)) {
         Some(name) => Err(Error::RenamedEnvVar(name)),
         None => Ok(()),
